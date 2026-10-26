@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0e7a5f">
+<title>Check in</title>
+<style>
+	:root {
+		--ink: #1b2a28;
+		--muted: #5b6b68;
+		--page: #f2f5f4;
+		--card: #ffffff;
+		--line: #d5dedb;
+		--in: #0e7a5f;
+		--out: #394a8c;
+		--error: #b3261e;
+	}
+	* { box-sizing: border-box; }
+	html, body { margin: 0; background: var(--page); color: var(--ink); }
+	body {
+		font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans Tamil", "Noto Sans", sans-serif;
+		font-size: 16px;
+		line-height: 1.5;
+		padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+	}
+	main { max-width: 440px; margin: 0 auto; padding: 20px 16px 32px; }
+	h1 { font-size: 1.5rem; line-height: 1.25; margin: 0; }
+	.last { margin: 4px 0 0; color: var(--muted); min-height: 1.5em; }
+	.frame {
+		position: relative;
+		margin-top: 20px;
+		aspect-ratio: 1 / 1;
+		border-radius: 24px;
+		overflow: hidden;
+		background: #dfe7e4;
+		border: 1px solid var(--line);
+	}
+	.frame video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); display: none; }
+	.frame.live video { display: block; }
+	.idle {
+		position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+		padding: 24px; text-align: center; color: var(--muted);
+	}
+	.frame.live .idle { display: none; }
+	.clock {
+		position: absolute; left: 12px; bottom: 12px; padding: 4px 12px; border-radius: 999px;
+		background: rgba(27, 42, 40, 0.78); color: #fff; font-variant-numeric: tabular-nums; font-size: 0.95rem;
+	}
+	.status { min-height: 3em; margin: 16px 0 8px; }
+	.status.error { color: var(--error); }
+	.status.ok { color: var(--in); font-weight: 600; }
+	.actions { display: grid; gap: 12px; }
+	button {
+		font: inherit; font-weight: 600; min-height: 56px; border: 0; border-radius: 14px;
+		padding: 0 20px; color: #fff; background: var(--ink); cursor: pointer;
+	}
+	button[hidden] { display: none; }
+	button.in { background: var(--in); }
+	button.out { background: var(--out); }
+	button:disabled { opacity: 0.55; cursor: default; }
+	button:focus-visible { outline: 3px solid #f2b705; outline-offset: 2px; }
+	.note { margin: 20px 0 0; font-size: 0.875rem; color: var(--muted); }
+	.notice { margin-top: 24px; padding: 16px; border-radius: 14px; background: var(--card); border: 1px solid var(--line); }
+</style>
+</head>
+<body>
+<main>
+	<header>
+		<h1>{{ (employee.employee_name if employee else "Check in") | e }}</h1>
+		<p class="last" id="last">{{ last_checkin | e }}</p>
+	</header>
+
+	{% if not employee %}
+	<p class="notice">Your login is not linked to an active employee record. Please contact HR.</p>
+	{% else %}
+	<section class="frame" id="frame">
+		<video id="video" playsinline muted autoplay></video>
+		<div class="idle" id="idle">Turn on the camera, then check in or check out.</div>
+		<div class="clock" id="clock"></div>
+	</section>
+
+	<p class="status" id="status" role="status" aria-live="polite"></p>
+
+	<div class="actions">
+		<button type="button" id="start">Turn on camera</button>
+		<button type="button" class="in" id="btn-in" hidden>Check in</button>
+		<button type="button" class="out" id="btn-out" hidden>Check out</button>
+	</div>
+
+	<p class="note">Each check-in saves your photo and your location.</p>
+	{% endif %}
+</main>
+
+{% if employee %}
+<script>
+(function () {
+	var csrfToken = {{ csrf_token | tojson }};
+	var frame = document.getElementById("frame");
+	var video = document.getElementById("video");
+	var statusEl = document.getElementById("status");
+	var lastEl = document.getElementById("last");
+	var clockEl = document.getElementById("clock");
+	var startBtn = document.getElementById("start");
+	var inBtn = document.getElementById("btn-in");
+	var outBtn = document.getElementById("btn-out");
+	var stream = null;
+
+	function setStatus(text, kind) {
+		statusEl.textContent = text || "";
+		statusEl.className = "status" + (kind ? " " + kind : "");
+	}
+
+	function setBusy(busy) {
+		startBtn.disabled = busy;
+		inBtn.disabled = busy;
+		outBtn.disabled = busy;
+	}
+
+	function showCameraControls(on) {
+		frame.classList.toggle("live", on);
+		startBtn.hidden = on;
+		inBtn.hidden = !on;
+		outBtn.hidden = !on;
+	}
+
+	function tickClock() {
+		clockEl.textContent = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+	}
+	tickClock();
+	setInterval(tickClock, 15000);
+
+	function stopCamera() {
+		if (stream) {
+			stream.getTracks().forEach(function (t) { t.stop(); });
+			stream = null;
+		}
+		video.srcObject = null;
+		showCameraControls(false);
+	}
+
+	async function startCamera() {
+		if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+			throw new Error("This browser cannot open the camera. Use Chrome on Android or Safari on iPhone, on a secure (https) address.");
+		}
+		try {
+			stream = await navigator.mediaDevices.getUserMedia({
+				video: { facingMode: "user", width: { ideal: 720 }, height: { ideal: 720 } },
+				audio: false
+			});
+		} catch (err) {
+			if (err && err.name === "NotAllowedError") {
+				throw new Error("Camera access is blocked. Allow the camera for this site in your browser settings and try again.");
+			}
+			throw new Error("The camera could not be opened. Close other apps that use the camera and try again.");
+		}
+		video.srcObject = stream;
+		await video.play();
+		showCameraControls(true);
+	}
+
+	function getPosition(options) {
+		return new Promise(function (resolve, reject) {
+			if (!navigator.geolocation) {
+				reject(new Error("This phone cannot share its location."));
+				return;
+			}
+			navigator.geolocation.getCurrentPosition(resolve, function (err) {
+				reject(new Error(err && err.code === 1
+					? "Location access is blocked. Allow location for this site in your browser settings and try again."
+					: "Your location could not be found. Move to an open area and try again."));
+			}, options);
+		});
+	}
+
+	function capture() {
+		var w = video.videoWidth;
+		var h = video.videoHeight;
+		if (!w || !h) {
+			throw new Error("The camera is not ready yet. Wait a moment and try again.");
+		}
+		var scale = Math.min(1, 640 / Math.max(w, h));
+		var canvas = document.createElement("canvas");
+		canvas.width = Math.round(w * scale);
+		canvas.height = Math.round(h * scale);
+		canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+		return canvas.toDataURL("image/jpeg", 0.8);
+	}
+
+	function errorText(data, httpStatus) {
+		try {
+			if (data && data._server_messages) {
+				var parts = JSON.parse(data._server_messages).map(function (m) { return JSON.parse(m).message; });
+				var doc = new DOMParser().parseFromString(parts.join(" "), "text/html");
+				var text = (doc.body.textContent || "").trim();
+				if (text) { return text; }
+			}
+		} catch (e) { /* fall through */ }
+		if (httpStatus === 401 || httpStatus === 403) {
+			return "Your session has ended. Reload the page and sign in again.";
+		}
+		return "Something went wrong (" + httpStatus + "). Please try again.";
+	}
+
+	async function punch(logType) {
+		setBusy(true);
+		try {
+			setStatus("Getting your location...");
+			var pos = await getPosition({ enableHighAccuracy: true, timeout: 20000, maximumAge: 0 });
+			var image = capture();
+			setStatus("Saving your check-in...");
+			var res = await fetch("/api/method/face_checkin.api.checkin", {
+				method: "POST",
+				credentials: "same-origin",
+				headers: {
+					"Content-Type": "application/json",
+					"Accept": "application/json",
+					"X-Frappe-CSRF-Token": csrfToken
+				},
+				body: JSON.stringify({
+					log_type: logType,
+					image: image,
+					latitude: pos.coords.latitude,
+					longitude: pos.coords.longitude,
+					accuracy: pos.coords.accuracy
+				})
+			});
+			var data = await res.json().catch(function () { return {}; });
+			if (!res.ok) {
+				throw new Error(errorText(data, res.status));
+			}
+			var r = data.message || {};
+			var verb = logType === "IN" ? "Checked in" : "Checked out";
+			var text = verb + " at " + r.time + ".";
+			if (r.on_hold) {
+				text += " HR will review this check-in before it counts.";
+			}
+			lastEl.textContent = verb + " at " + r.time;
+			setStatus(text, r.on_hold ? "" : "ok");
+			stopCamera();
+		} catch (err) {
+			setStatus(err.message, "error");
+		} finally {
+			setBusy(false);
+		}
+	}
+
+	startBtn.addEventListener("click", async function () {
+		setBusy(true);
+		setStatus("");
+		try {
+			await startCamera();
+			// Ask for location now so the permission prompt does not appear mid check-in
+			getPosition({ enableHighAccuracy: true, timeout: 20000, maximumAge: 60000 }).catch(function (err) {
+				setStatus(err.message, "error");
+			});
+		} catch (err) {
+			setStatus(err.message, "error");
+		} finally {
+			setBusy(false);
+		}
+	});
+
+	inBtn.addEventListener("click", function () { punch("IN"); });
+	outBtn.addEventListener("click", function () { punch("OUT"); });
+})();
+</script>
+{% endif %}
+</body>
+</html>

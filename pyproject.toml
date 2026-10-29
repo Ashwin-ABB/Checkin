@@ -7,7 +7,7 @@ description = "Check-in with selfie and geolocation for Frappe HR"
 requires-python = ">=3.11"
 readme = "README.md"
 dynamic = ["version"]
-dependencies = ["boto3"]
+dependencies = ["opencv-python-headless", "numpy"]
 
 [build-system]
 requires = ["flit_core >=3.4,<4"]
